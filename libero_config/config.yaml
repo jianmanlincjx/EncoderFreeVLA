@@ -1,0 +1,5 @@
+assets: /pfs/pfs-Tr4Uts/JM_work/venvs/molmoact2_lerobot_venv/lib/python3.12/site-packages/libero/libero/./assets
+bddl_files: /pfs/pfs-Tr4Uts/JM_work/venvs/molmoact2_lerobot_venv/lib/python3.12/site-packages/libero/libero/./bddl_files
+benchmark_root: /pfs/pfs-Tr4Uts/JM_work/venvs/molmoact2_lerobot_venv/lib/python3.12/site-packages/libero/libero
+datasets: /pfs/pfs-Tr4Uts/JM_work/venvs/molmoact2_lerobot_venv/lib/python3.12/site-packages/libero/libero/../datasets
+init_states: /pfs/pfs-Tr4Uts/JM_work/venvs/molmoact2_lerobot_venv/lib/python3.12/site-packages/libero/libero/./init_files

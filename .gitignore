@@ -1,0 +1,8 @@
+outputs/
+data_cache/
+logs/
+__pycache__/
+*.pyc
+*.npy
+*.pt
+*.safetensors
