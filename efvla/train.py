@@ -99,7 +99,7 @@ def main():
         ensure_shm_copy(cfg.cache_dir, cfg.shm_dir)
     dist.barrier()
     data_dir = cfg.shm_dir or cfg.cache_dir
-    ds = LiberoFrames(data_dir, cfg.chunk)
+    ds = LiberoFrames(data_dir, cfg.chunk, augment=cfg.augment)
     tok = Tokenize(cfg.llm_path, cfg.prompt_template)
     loader = DataLoader(ds, batch_size=cfg.per_gpu_batch, sampler=InfiniteRandomSampler(len(ds), cfg.seed, rank),
                         num_workers=cfg.num_workers, pin_memory=True, drop_last=True,
@@ -115,7 +115,7 @@ def main():
     model.init_new_modules(rms)
     model.to(device)
     first = next(it)
-    imgs0 = preprocess(first["images"].to(device), augment=False, train=False)
+    imgs0 = preprocess(first["images"].to(device), cfg.model_img_size)
     before, after = model.calibrate_vision_scale(imgs0, rms)
     log(rank, f"[init] text-emb RMS={rms:.4f}  vision-token RMS before={before:.4f} after={after:.4f}")
     if cfg.diag:
@@ -184,8 +184,8 @@ def main():
         dist.barrier()
         log(rank, f"[ckpt] saved {d}")
 
-    def make_batch(b, gen=None):
-        images = preprocess(b["images"].to(device, non_blocking=True), augment=cfg.augment, train=True, generator=gen)
+    def make_batch(b):
+        images = preprocess(b["images"].to(device, non_blocking=True), cfg.model_img_size)
         ids, val = tok.batch([ds.tasks[i] for i in b["task_id"].tolist()], device)
         actions = b["actions"].to(device, non_blocking=True).float()
         action_valid = ~b["is_pad"].to(device, non_blocking=True)

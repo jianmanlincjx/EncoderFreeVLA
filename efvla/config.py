@@ -14,7 +14,7 @@ class Config:
 
     # ---- paths ----
     llm_path: str = f"{ROOT}/hf_models/Qwen3-4B"
-    siglip_path: str = f"{ROOT}/hf_models/siglip2-so400m-patch16-256"
+    siglip_path: str = f"{ROOT}/hf_models/siglip2-so400m-patch14-384"  # same ViT dims as MolmoAct2
     libero_root: str = "/pfs/pfs-Tr4Uts/libero"  # openpi-format LIBERO (LeRobot v2.1 parquet, images already rot180)
     suite: str = "libero_object"
     cache_dir: str = f"{ROOT}/encoder_free_vla/data_cache/libero_object"
@@ -22,12 +22,13 @@ class Config:
     out_dir: str = f"{ROOT}/encoder_free_vla/outputs/debug"
 
     # ---- inputs ----
-    img_size: int = 256
+    img_size: int = 256  # stored frames
+    model_img_size: int = 378  # MolmoAct2 image size (crop_mode=resize): both arms see 378x378 in [-1, 1]
     n_cams: int = 2  # agentview, wrist (fixed order)
-    ef_patch: int = 32  # EF arm: 256/32 = 8x8 = 64 tokens per camera
+    ef_patch: int = 27  # EF arm: 378/27 = 14x14 = 196 tokens per camera (MolmoAct2's pooled grid)
     use_state: bool = False  # starVLA LIBERO recipe does not use proprio
     state_dim: int = 8
-    augment: bool = False  # starVLA LIBERO recipe does not augment
+    augment: bool = True  # MolmoAct2 LIBERO augmentation (LeRobot ImageTransforms, see data/transforms.py)
     prompt_template: str = "Task: {instruction}. Action:"
 
     # ---- action expert (MolmoAct2 defaults) ----
@@ -98,7 +99,7 @@ def parse_config(argv=None, base: Config | None = None) -> Config:
     args = p.parse_args(argv)
     cfg = Config(**vars(args))
     assert cfg.arm in ("ef", "enc"), cfg.arm
-    assert cfg.img_size % cfg.ef_patch == 0
+    assert cfg.model_img_size % cfg.ef_patch == 0
     return cfg
 
 

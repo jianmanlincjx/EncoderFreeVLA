@@ -40,12 +40,12 @@ class VLA(nn.Module):
         self.backbone = Qwen3KVBackbone(cfg.llm_path if load_pretrained else None, config=llm_config)
         D = self.backbone.hidden_size
         if cfg.arm == "ef":
-            self.vision = EFVisionEmbedder(img_size=cfg.img_size, patch=cfg.ef_patch, embed_dim=D, out_dim=D)
+            self.vision = EFVisionEmbedder(img_size=cfg.model_img_size, patch=cfg.ef_patch, embed_dim=D, out_dim=D)
         else:
             from .vision_enc import ENCVision
 
             self.vision = ENCVision(siglip_path=cfg.siglip_path if load_pretrained else None, out_dim=D,
-                                    siglip_config=siglip_config)
+                                    siglip_config=siglip_config, img_size=cfg.model_img_size)
         self.n_img_tokens = self.vision.tokens_per_image
         self.cam_embed = nn.Parameter(torch.zeros(cfg.n_cams, D))
         self.state_proj = nn.Linear(cfg.state_dim, D) if cfg.use_state else None
@@ -88,15 +88,14 @@ class VLA(nn.Module):
         """Rescale the vision entry's last linear so real image tokens have RMS = target (both arms)."""
         tok = self.vision(images.flatten(0, 1).to(next(self.vision.parameters()).dtype)).float()
         before = float(tok.pow(2).mean(-1).sqrt().mean())
-        last = self.vision.embedding_projection if self.cfg.arm == "ef" else self.vision.connector[3]
-        last.weight.mul_(target_rms / before)
+        self.vision.last_linear.weight.mul_(target_rms / before)
         tok = self.vision(images.flatten(0, 1).to(next(self.vision.parameters()).dtype)).float()
         after = float(tok.pow(2).mean(-1).sqrt().mean())
         return before, after
 
     # ------------------------------------------------------------------ sequence
     def build_sequence(self, text_ids, text_valid, images, state=None):
-        """text_ids/text_valid [B, Lt] (left padded); images float [B, N, 3, H, W] in [0,1]; state [B, 8]."""
+        """text_ids/text_valid [B, Lt] (left padded); images float [B, N, 3, 378, 378] in [-1,1]; state [B, 8]."""
         B, N = images.shape[:2]
         assert N == self.cfg.n_cams
         emb = self.backbone.embed_tokens(text_ids)

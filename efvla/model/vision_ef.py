@@ -4,10 +4,12 @@
 Gemma4UnifiedVisionEmbedder:  raw_patches -> LN1 -> Dense -> LN2 -> + factorised (x, y) pos-emb -> LN3
                               -> RMSNorm(no scale) -> Linear(no bias)  [Gemma4UnifiedMultimodalEmbedder]
 Differences from Gemma 4 12B (documented on purpose):
-  * patch 32 px on the native 256x256 LIBERO frame (Gemma uses 48 px = 16 px x 3x3 merge); no resampling.
-  * fixed 8x8 grid, so the position table has 8 rows per axis instead of 1120.
-  * the last Linear is initialised so the output RMS matches the LLM's text-embedding RMS (see init_out).
-Pixels are in [0, 1] with no mean/std normalisation, as in the Gemma 4 image processor (do_normalize=False).
+  * input = MolmoAct2's 378x378 image, patch 27 px -> 14x14 = 196 tokens (MolmoAct2's pooled grid);
+    Gemma uses 48 px (= 16 px x 3x3 merge).
+  * fixed 14x14 grid, so the position table has 14 rows per axis instead of 1120.
+  * the last Linear is rescaled so image tokens match the LLM's text-embedding RMS (VLA.calibrate_vision_scale).
+Pixels arrive in [-1, 1] (MolmoAct2 convention). Gemma feeds [0, 1]; the first op is a per-patch LayerNorm,
+which is invariant to the affine map x -> 2x - 1 (up to eps), so the two conventions are equivalent.
 Patch layout inside a flattened patch is (ph, pw, c), as produced by Gemma's patchifier.
 """
 import math
@@ -69,11 +71,15 @@ class EFVisionEmbedder(nn.Module):
         nn.init.normal_(self.embedding_projection.weight, std=target_rms / math.sqrt(self.embedding_projection.in_features))
 
     @property
+    def last_linear(self):
+        return self.embedding_projection
+
+    @property
     def tokens_per_image(self) -> int:
         return self.grid * self.grid
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        """images: float [B, 3, H, W] in [0, 1] -> [B, grid*grid, out_dim]."""
+        """images: float [B, 3, H, W] (MolmoAct2 convention [-1, 1]) -> [B, grid*grid, out_dim]."""
         x = patchify(images, self.patch).to(self.patch_dense.weight.dtype)
         x = self.patch_ln1(x)
         x = self.patch_dense(x)

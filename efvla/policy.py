@@ -39,8 +39,8 @@ class Policy:
     @torch.no_grad()
     def act(self, images_u8: np.ndarray, state8: np.ndarray, instruction: str) -> np.ndarray:
         """images_u8 [2, 256, 256, 3] uint8 in dataset orientation (agentview, wrist); returns [H, 7] env actions."""
-        x = torch.from_numpy(np.ascontiguousarray(images_u8))[None].to(self.device)
-        x = preprocess(x, augment=self.cfg.augment, train=False)
+        x = torch.from_numpy(np.ascontiguousarray(images_u8))[None]
+        x = preprocess(x, self.cfg.model_img_size).to(self.device)  # MolmoAct2 eval path (uint8 resize on CPU)
         if self.blank:
             x = torch.zeros_like(x)
         ids, val = self.tok.batch([instruction], self.device)

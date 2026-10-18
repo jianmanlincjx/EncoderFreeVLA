@@ -29,7 +29,7 @@ def main():
     dev = torch.device("cuda")
     dtype = torch.bfloat16 if a.dtype == "bf16" else torch.float32
     model, cfg, ck = load_model(a.ckpt, dev, dtype)
-    ds = LiberoFrames(cfg.shm_dir if os.path.exists(cfg.shm_dir) else cfg.cache_dir, cfg.chunk)
+    ds = LiberoFrames(cfg.shm_dir if os.path.exists(cfg.shm_dir) else cfg.cache_dir, cfg.chunk, augment=False)
     tok = Tokenize(cfg.llm_path, cfg.prompt_template)
     rng = np.random.default_rng(0)
     g = torch.Generator(device=dev).manual_seed(0)
@@ -37,7 +37,7 @@ def main():
     for _ in range(a.batches):
         idx = rng.choice(len(ds), a.bs, replace=False)
         items = [ds[i] for i in idx]
-        imgs = preprocess(torch.stack([x["images"] for x in items]).to(dev), augment=False, train=False)
+        imgs = preprocess(torch.stack([x["images"] for x in items]).to(dev), cfg.model_img_size)
         acts = torch.stack([x["actions"] for x in items]).to(dev).float()
         av = ~torch.stack([x["is_pad"] for x in items]).to(dev)
         st = torch.stack([x["state"] for x in items]).to(dev)

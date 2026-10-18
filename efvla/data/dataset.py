@@ -29,9 +29,11 @@ def ensure_shm_copy(cache_dir: str, shm_dir: str) -> str:
 
 
 class LiberoFrames(Dataset):
-    def __init__(self, data_dir: str, chunk: int):
+    def __init__(self, data_dir: str, chunk: int, augment: bool = False):
         self.dir = data_dir
         self.chunk = chunk
+        self.augment = augment
+        self._aug = None  # built lazily inside each DataLoader worker
         self.frames = np.load(os.path.join(data_dir, "frames.npy"), mmap_mode="r")
         m = np.load(os.path.join(data_dir, "meta.npz"))
         self.state, self.actions = m["state"], m["actions"]
@@ -63,8 +65,19 @@ class LiberoFrames(Dataset):
         idx, is_pad = self.chunk_indices(i)
         actions = self.norm_actions[idx].copy()
         actions[is_pad] = 0.0
+        frames = np.array(self.frames[i])  # uint8 [2,256,256,3] (copy: memmap is read-only)
+        if self.augment:
+            if self._aug is None:
+                from .transforms import make_train_augment
+
+                self._aug = make_train_augment()
+            from .transforms import augment_frames
+
+            images = augment_frames(frames, self._aug)  # float [2,3,256,256] in [0,1]
+        else:
+            images = torch.from_numpy(frames)
         return {
-            "images": torch.from_numpy(np.ascontiguousarray(self.frames[i])),  # uint8 [2,256,256,3]
+            "images": images,
             "state": torch.from_numpy(self.norm_state[i]),
             "actions": torch.from_numpy(actions),  # [H,7] normalised
             "is_pad": torch.from_numpy(is_pad),  # [H] bool

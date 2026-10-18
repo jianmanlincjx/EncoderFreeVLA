@@ -1,71 +1,64 @@
-"""Image preprocessing shared by training and evaluation (same functions, same interpolation).
+"""Image pipeline aligned with MolmoAct2 (both arms see exactly the same pixels).
 
-Input: uint8 tensor [B, N_cam, H, W, 3]. Output: float32 [B, N_cam, 3, H, W] in [0, 1].
-augment=False: identity (train and eval).
-augment=True : train = per-sample, per-camera RandomResizedCrop(area 0.9, ratio 1) + ColorJitter;
-               eval  = deterministic centre crop of side round(sqrt(0.9) * H) resized back to H.
+Training augmentation (per camera, independently, on the 256x256 frame, float CHW in [0, 1]):
+  LeRobot ImageTransforms with the settings of the user's MolmoAct2 LIBERO run
+  (release_ckpt/molmoact2/baseline/train_config.json -> dataset.image_transforms):
+  pick 3 of 6 transforms by weight (no repetition), applied in config order:
+  brightness [0.8,1.2], contrast [0.8,1.2], saturation [0.5,1.5], hue [-0.05,0.05],
+  sharpness [0.5,1.5] (SharpnessJitter), RandomAffine(degrees +-5, translate 5%).
+Model input (train and eval), as MolmoAct2ImageProcessor with crop_mode="resize" + the model's on-device
+canonicalisation (Checkpoint/MolmoAct2/image_processing_molmoact2.py resize_image / normalize_image and
+modeling_molmoact2.py MolmoAct2VisionBackbone.forward):
+  resize to 378x378 (torchvision Resize, BILINEAR, antialias=False, no aspect preservation),
+  values on the uint8 grid, then x*2-1 in [-1, 1].
+  uint8 input  -> resize on uint8 with torchvision v1 (bit-exact with MolmoAct2's processor on CPU)
+  float input  -> resize on float, clip [0,1], round to the uint8 grid (MolmoAct2's canonicalisation)
 """
-import math
-
+import numpy as np
 import torch
-import torch.nn.functional as F
-import torchvision.transforms.v2.functional as TF
+import torchvision.transforms.functional as TF  # v1 functional, as torchvision.transforms.Resize in MolmoAct2
+from torchvision.transforms import InterpolationMode
 
-CROP_AREA = 0.9
-JITTER = dict(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)
+MODEL_IMG_SIZE = 378
 
-
-def to_float(images_u8: torch.Tensor) -> torch.Tensor:
-    assert images_u8.dtype == torch.uint8 and images_u8.shape[-1] == 3, (images_u8.dtype, images_u8.shape)
-    return images_u8.permute(0, 1, 4, 2, 3).float() / 255.0
-
-
-def _resize(x: torch.Tensor, size: int) -> torch.Tensor:
-    return F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False, antialias=True)
-
-
-def crop_side(h: int) -> int:
-    return int(round(math.sqrt(CROP_AREA) * h))
+MOLMOACT2_LIBERO_TFS = {
+    "brightness": {"weight": 1.0, "type": "ColorJitter", "kwargs": {"brightness": [0.8, 1.2]}},
+    "contrast": {"weight": 1.0, "type": "ColorJitter", "kwargs": {"contrast": [0.8, 1.2]}},
+    "saturation": {"weight": 1.0, "type": "ColorJitter", "kwargs": {"saturation": [0.5, 1.5]}},
+    "hue": {"weight": 1.0, "type": "ColorJitter", "kwargs": {"hue": [-0.05, 0.05]}},
+    "sharpness": {"weight": 1.0, "type": "SharpnessJitter", "kwargs": {"sharpness": [0.5, 1.5]}},
+    "affine": {"weight": 1.0, "type": "RandomAffine", "kwargs": {"degrees": [-5.0, 5.0], "translate": [0.05, 0.05]}},
+}
 
 
-def _crop_resize(img: torch.Tensor, top: int, left: int, side: int, out: int) -> torch.Tensor:
-    return _resize(img[None, :, top : top + side, left : left + side], out)[0]
+def make_train_augment():
+    """LeRobot ImageTransforms(enable, max_num_transforms=3, random_order=False, tfs as above)."""
+    from lerobot.transforms import ImageTransformConfig, ImageTransforms, ImageTransformsConfig
+
+    tfs = {k: ImageTransformConfig(weight=v["weight"], type=v["type"], kwargs=v["kwargs"])
+           for k, v in MOLMOACT2_LIBERO_TFS.items()}
+    return ImageTransforms(ImageTransformsConfig(enable=True, max_num_transforms=3, random_order=False, tfs=tfs))
 
 
-def _color_jitter(img: torch.Tensor, g: torch.Generator) -> torch.Tensor:
-    def u(lo, hi):
-        return float(lo + (hi - lo) * torch.rand((), generator=g))
-
-    b = u(1 - JITTER["brightness"], 1 + JITTER["brightness"])
-    c = u(1 - JITTER["contrast"], 1 + JITTER["contrast"])
-    s = u(1 - JITTER["saturation"], 1 + JITTER["saturation"])
-    h = u(-JITTER["hue"], JITTER["hue"])
-    img = TF.adjust_brightness(img, b)
-    img = TF.adjust_contrast(img, c)
-    img = TF.adjust_saturation(img, s)
-    img = TF.adjust_hue(img, h)
-    return img.clamp(0.0, 1.0)
+def augment_frames(frames_u8: np.ndarray, aug) -> torch.Tensor:
+    """frames_u8 [N_cam, H, W, 3] uint8 -> float [N_cam, 3, H, W] in [0, 1], each camera augmented independently."""
+    x = torch.from_numpy(np.ascontiguousarray(frames_u8)).permute(0, 3, 1, 2).float() / 255.0
+    return torch.stack([aug(x[i]) for i in range(x.shape[0])], 0)
 
 
-def preprocess(images_u8: torch.Tensor, *, augment: bool, train: bool, generator: torch.Generator | None = None):
-    x = to_float(images_u8)
-    if not augment:
-        return x
-    B, N, C, H, W = x.shape
-    assert H == W
-    side = crop_side(H)
-    out = torch.empty_like(x)
-    if not train:
-        top = left = (H - side) // 2
-        for b in range(B):
-            for n in range(N):
-                out[b, n] = _crop_resize(x[b, n], top, left, side, H)
-        return out
-    g = generator if generator is not None else torch.default_generator
-    for b in range(B):
-        for n in range(N):
-            top = int(torch.randint(0, H - side + 1, (), generator=g))
-            left = int(torch.randint(0, W - side + 1, (), generator=g))
-            img = _crop_resize(x[b, n], top, left, side, H)
-            out[b, n] = _color_jitter(img, g)
-    return out
+def preprocess(images: torch.Tensor, size: int = MODEL_IMG_SIZE) -> torch.Tensor:
+    """images: uint8 [B, N, H, W, 3] (raw) or float [B, N, 3, H, W] in [0, 1] (augmented)
+    -> float32 [B, N, 3, size, size] in [-1, 1]."""
+    if images.dtype == torch.uint8:
+        assert images.shape[-1] == 3, images.shape
+        B, N = images.shape[:2]
+        x = images.permute(0, 1, 4, 2, 3).reshape(B * N, 3, *images.shape[2:4])
+        x = TF.resize(x, [size, size], interpolation=InterpolationMode.BILINEAR, antialias=False)
+        x = x.float() / 255.0
+    else:
+        assert images.dim() == 5 and images.shape[2] == 3, images.shape
+        B, N = images.shape[:2]
+        x = images.reshape(B * N, *images.shape[2:]).float()
+        x = TF.resize(x, [size, size], interpolation=InterpolationMode.BILINEAR, antialias=False)
+        x = torch.round(x.clamp(0.0, 1.0) * 255.0) / 255.0
+    return (x * 2.0 - 1.0).view(B, N, 3, size, size)

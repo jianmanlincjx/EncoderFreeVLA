@@ -53,15 +53,16 @@ def tiny_qwen3_config(layers=2):
 def tiny_cfg(arm="ef", use_state=False):
     from efvla.config import Config
 
-    return Config(arm=arm, img_size=64, ef_patch=32, chunk=10, action_dim=7, ae_hidden=32, ae_heads=4,
+    return Config(arm=arm, model_img_size=56, ef_patch=28, chunk=10, action_dim=7, ae_hidden=32, ae_heads=4,
                   ae_timestep_dim=16, use_state=use_state)
 
 
 def tiny_siglip_config():
     from transformers import SiglipVisionConfig
 
-    return SiglipVisionConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=2, num_attention_heads=2,
-                              image_size=64, patch_size=16, vision_use_head=False)
+    return SiglipVisionConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=10, num_attention_heads=2,
+                              image_size=56, patch_size=14, vision_use_head=False, hidden_act="gelu_pytorch_tanh",
+                              layer_norm_eps=1e-6)
 
 
 def randomize_(module, std=0.2, seed=0):
@@ -81,9 +82,9 @@ def t_patchify():
         x = image.reshape(c, h // p, p, w // p, p).permute(1, 3, 2, 4, 0)
         return x.reshape((h // p) * (w // p), -1)
 
-    x = torch.rand(3, 3, 256, 256)
-    ours = patchify(x, 32)
-    ref = torch.stack([gemma_ref(x[i], 32) for i in range(3)])
+    x = torch.rand(3, 3, 378, 378)
+    ours = patchify(x, 27)
+    ref = torch.stack([gemma_ref(x[i], 27) for i in range(3)])
     assert torch.equal(ours, ref)
     return f"shape {tuple(ours.shape)}"
 
@@ -163,21 +164,122 @@ def t_ef_uniform():
     return f"|out| flat={a.norm(dim=-1).mean():.3f} noisy={b.norm(dim=-1).mean():.3f} (Gemma-style LN amplifies tiny noise; documented)"
 
 
-@check("2x2 merge groups the right spatial neighbours")
-def t_merge():
-    from efvla.model.vision_enc import merge_2x2
 
-    g = 4
-    rows = torch.arange(g).repeat_interleave(g).float()
-    cols = torch.arange(g).repeat(g).float()
-    x = torch.stack([rows, cols], -1)[None]  # [1, 16, 2] token = its (row, col)
-    m = merge_2x2(x, g)[0].view(4, 4, 2)  # merged token -> 4 members x (row, col)
-    for i in range(2):
-        for j in range(2):
-            members = {tuple(v.tolist()) for v in m[i * 2 + j]}
-            exp = {(2 * i + a, 2 * j + b) for a in range(2) for b in range(2)}
-            assert members == {tuple(map(float, e)) for e in exp}, (i, j, members)
-    return "ok"
+# ----------------------------------------------------------------------------------------------- MolmoAct2 front end
+def _import_ma2_image_processing():
+    _import_molmoact2()
+    import importlib
+
+    return importlib.import_module("transformers_modules.MolmoAct2.image_processing_molmoact2")
+
+
+@check("preprocess(uint8) == MolmoAct2 image processor resize+normalize (378, bilinear, no antialias)")
+def t_preprocess_vs_ma2():
+    IP = _import_ma2_image_processing()
+    from transformers.image_utils import PILImageResampling
+    from efvla.data.transforms import preprocess
+
+    rng = np.random.default_rng(0)
+    img = rng.integers(0, 256, (256, 256, 3), dtype=np.uint8)
+    ref = IP.normalize_image(IP.resize_image(img, [378, 378], PILImageResampling.BILINEAR), [0.5] * 3, [0.5] * 3)
+    ours = preprocess(torch.from_numpy(img)[None, None])[0, 0].permute(1, 2, 0).numpy()
+    d = float(np.abs(ours - ref).max())
+    assert d < 1e-6, d
+    # float (augmented) path lands on the same uint8 grid
+    f = preprocess(torch.from_numpy(img).permute(2, 0, 1).float()[None, None] / 255.0)
+    on_grid = float(((f + 1) / 2 * 255 - torch.round((f + 1) / 2 * 255)).abs().max())
+    assert on_grid < 1e-4, on_grid
+    return f"uint8 path max |diff| {d:.1e}; float path on uint8 grid"
+
+
+@check("pooling windows == MolmoAct2 arange_for_pooling (27x27 -> 14x14, pad bottom/right)")
+def t_pool_windows():
+    IP = _import_ma2_image_processing()
+    from efvla.model.vision_enc import pooling_windows
+
+    for g in (27, 4, 5):
+        ref = IP.arange_for_pooling(np.arange(g * g).reshape(g, g), 2, 2).reshape(-1, 4)
+        ours = pooling_windows(g, 2).numpy()
+        assert (ref == ours).all(), g
+    return "grids 27, 4, 5 identical"
+
+
+@check("ENC front end == MolmoAct2VisionBackbone end to end (ViT blocks -3/-9, 2x2 attn pooling, SwiGLU)")
+def t_enc_vs_ma2():
+    M, C = _import_molmoact2()
+    IP = _import_ma2_image_processing()
+    from efvla.model.vision_enc import ENCVision
+
+    torch.manual_seed(0)
+    scfg = tiny_siglip_config()
+    ours = ENCVision(siglip_path=None, out_dim=40, siglip_config=scfg, img_size=56).eval()
+    randomize_(ours.image_pooling_2d, 0.1, 1)
+    randomize_(ours.image_projector, 0.1, 2)
+    vit_cfg = C.MolmoAct2VitConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=10, num_attention_heads=2,
+                                   num_key_value_heads=2, head_dim=16, hidden_act="gelu_pytorch_tanh",
+                                   image_patch_size=14, image_num_pos=16, image_default_input_size=[56, 56],
+                                   layer_norm_eps=1e-6, float32_attention=True, attention_dropout=0.0,
+                                   residual_dropout=0.0)
+    ad_cfg = C.MolmoAct2AdapterConfig(vit_layers=[-3, -9], hidden_size=1152, num_attention_heads=16,
+                                      num_key_value_heads=16, head_dim=72, intermediate_size=9728,
+                                      text_hidden_size=40, hidden_act="silu", pooling_attention_mask=True,
+                                      float32_attention=True, attention_dropout=0.0, residual_dropout=0.0,
+                                      image_feature_dropout=0.0)
+    for c in (vit_cfg, ad_cfg):
+        c._attn_implementation = "sdpa"
+    ref = M.MolmoAct2VisionBackbone(vit_cfg, ad_cfg).eval()
+    # map SigLIP (HF) -> MolmoAct2 ViT naming
+    sv = ours.siglip.vision_model
+    sd = {"image_vit.positional_embedding": sv.embeddings.position_embedding.weight,
+          "image_vit.patch_embedding.weight": sv.embeddings.patch_embedding.weight.permute(0, 2, 3, 1).reshape(32, -1),
+          "image_vit.patch_embedding.bias": sv.embeddings.patch_embedding.bias}
+    for i, wl in enumerate(sv.encoder.layers):
+        l = wl.inner
+        pre = f"image_vit.transformer.resblocks.{i}."
+        for a, b in (("wq", l.self_attn.q_proj), ("wk", l.self_attn.k_proj), ("wv", l.self_attn.v_proj),
+                     ("wo", l.self_attn.out_proj)):
+            sd[pre + f"attention.{a}.weight"], sd[pre + f"attention.{a}.bias"] = b.weight, b.bias
+        sd[pre + "feed_forward.w1.weight"], sd[pre + "feed_forward.w1.bias"] = l.mlp.fc1.weight, l.mlp.fc1.bias
+        sd[pre + "feed_forward.w2.weight"], sd[pre + "feed_forward.w2.bias"] = l.mlp.fc2.weight, l.mlp.fc2.bias
+        sd[pre + "attention_norm.weight"], sd[pre + "attention_norm.bias"] = l.layer_norm1.weight, l.layer_norm1.bias
+        sd[pre + "ffn_norm.weight"], sd[pre + "ffn_norm.bias"] = l.layer_norm2.weight, l.layer_norm2.bias
+    for k, v in ours.image_pooling_2d.state_dict().items():
+        sd["image_pooling_2d." + k] = v
+    for k, v in ours.image_projector.state_dict().items():
+        sd["image_projector." + k] = v
+    missing, unexpected = ref.load_state_dict({k: v.detach().clone() for k, v in sd.items()}, strict=False)
+    assert not missing and not unexpected, (missing, unexpected)
+    rng = np.random.default_rng(0)
+    imgs = [rng.integers(0, 256, (40, 40, 3), dtype=np.uint8) for _ in range(2)]
+    from efvla.data.transforms import preprocess
+
+    x = preprocess(torch.from_numpy(np.stack(imgs))[:, None], size=56)[:, 0]  # [2, 3, 56, 56] in [-1, 1]
+    patches = torch.from_numpy(IP.batch_pixels_to_patches(x.permute(0, 2, 3, 1).numpy(), 14))[:, None]  # [B,1,16,588]
+    pidx = IP.arange_for_pooling(np.arange(16).reshape(4, 4), 2, 2).reshape(-1, 4)
+    pidx = torch.from_numpy(np.stack([pidx, pidx]))  # [B, 4, 4]
+    with torch.no_grad():
+        r = ref(patches, pidx).view(2, 4, -1)
+        o = ours(x)
+    d = maxdiff(o, r)
+    scale = float(r.abs().max())
+    assert d / scale < 1e-5, (d, scale)
+    return f"max |diff| {d:.1e} at output scale {scale:.1e} (rel {d/scale:.1e}); tokens {tuple(o.shape)}"
+
+
+@check("training augmentation: LeRobot ImageTransforms, per camera, different draws, range [0,1]")
+def t_augment():
+    from efvla.data.transforms import augment_frames, make_train_augment
+
+    aug = make_train_augment()
+    fr = (np.random.default_rng(0).random((2, 256, 256, 3)) * 255).astype(np.uint8)
+    fr[1] = fr[0]
+    a = augment_frames(fr, aug)
+    b = augment_frames(fr, aug)
+    assert a.shape == (2, 3, 256, 256) and a.min() >= 0 and a.max() <= 1
+    assert maxdiff(a[0], a[1]) > 1e-3, "cameras not augmented independently"
+    assert maxdiff(a, b) > 1e-3, "two draws identical"
+    n = aug.tf.n_subset if hasattr(aug, "tf") else None
+    return f"n_subset={n}"
 
 
 # ----------------------------------------------------------------------------------------------- backbone
@@ -396,22 +498,6 @@ def t_dataset():
     return "ok"
 
 
-@check("transforms: per-sample augmentation; train==eval without augmentation; eval crop deterministic")
-def t_transforms():
-    from efvla.data.transforms import crop_side, preprocess
-
-    x = (torch.rand(1, 2, 64, 64, 3) * 255).to(torch.uint8).repeat(3, 1, 1, 1, 1)
-    a = preprocess(x, augment=True, train=True, generator=torch.Generator().manual_seed(0))
-    assert maxdiff(a[0], a[1]) > 1e-3 and maxdiff(a[0, 0], a[0, 1]) > 1e-3, "augmentation not independent"
-    p1 = preprocess(x, augment=False, train=True)
-    p2 = preprocess(x, augment=False, train=False)
-    assert torch.equal(p1, p2) and torch.equal(p1, x.permute(0, 1, 4, 2, 3).float() / 255)
-    e1 = preprocess(x, augment=True, train=False)
-    e2 = preprocess(x, augment=True, train=False)
-    assert torch.equal(e1, e2) and crop_side(256) == 243
-    return "ok"
-
-
 # ----------------------------------------------------------------------------------------------- whole model
 def _tiny_vla(arm, use_state=False, seed=0):
     from efvla.model.vla import VLA
@@ -433,7 +519,7 @@ def t_vla_leftpad():
         ids = torch.randint(0, 128, (B, 7))
         valid = torch.ones(B, 7, dtype=torch.bool)
         valid[0, :4] = False  # sample 0 has a 3-token prompt
-        imgs = torch.rand(B, 2, 3, 64, 64)
+        imgs = torch.rand(B, 2, 3, 56, 56) * 2 - 1
         state = torch.randn(B, 8)
         x_t = torch.randn(B, 2, H, 7)
         t = torch.rand(B, 2)
@@ -458,7 +544,7 @@ def t_vla_grads():
         B, H = 2, 10
         ids = torch.randint(0, 128, (B, 5))
         valid = torch.ones(B, 5, dtype=torch.bool)
-        out = m(ids, valid, torch.rand(B, 2, 3, 64, 64), torch.randn(B, 8), torch.randn(B, 2, H, 7), torch.rand(B, 2),
+        out = m(ids, valid, torch.rand(B, 2, 3, 56, 56) * 2 - 1, torch.randn(B, 8), torch.randn(B, 2, H, 7), torch.rand(B, 2),
                 torch.ones(B, H, dtype=torch.bool))
         out.pow(2).mean().backward()
         bad = []
@@ -478,7 +564,7 @@ def t_sample():
     m, cfg = _tiny_vla("ef")
     ids = torch.randint(0, 128, (1, 5))
     valid = torch.ones(1, 5, dtype=torch.bool)
-    imgs = torch.rand(1, 2, 3, 64, 64)
+    imgs = torch.rand(1, 2, 3, 56, 56) * 2 - 1
     noise = torch.randn(1, 10, 7)
     a1 = m.sample_actions(ids, valid, imgs, steps=10, noise=noise)
     a2 = m.sample_actions(ids, valid, imgs, steps=10, noise=noise)
