@@ -17,7 +17,7 @@ for ((w=0; w<W; w++)); do
   gpu=${G[$((w % ${#G[@]}))]}
   tasks=$(seq $w $W 9 | paste -sd,)
   [ -z "$tasks" ] && continue
-  CUDA_VISIBLE_DEVICES=$gpu MUJOCO_EGL_DEVICE_ID=0 $PY -m efvla.eval_libero --ckpt $CKPT --suite libero_object \
+  CUDA_VISIBLE_DEVICES=$gpu MUJOCO_EGL_DEVICE_ID=$gpu $PY -m efvla.eval_libero --ckpt $CKPT --suite libero_object \
     --tasks $tasks --episodes 50 --out $OUT "$@" > $OUT/worker_$w.log 2>&1 &
 done
 wait

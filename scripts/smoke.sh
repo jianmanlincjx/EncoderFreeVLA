@@ -21,7 +21,7 @@ CUDA_VISIBLE_DEVICES=$GPUS $TORCHRUN --nproc_per_node $N --master_port $PORT -m 
   | grep -vE "robosuite WARNING|private macro|setup_macros" | tee $OUT/overfit.log
 echo "SMOKE_OVERFIT_DONE $ARM $(date)"
 G0=$(echo $GPUS | cut -d, -f1)
-CUDA_VISIBLE_DEVICES=$G0 MUJOCO_EGL_DEVICE_ID=0 $PY -m efvla.eval_libero --ckpt $OUT/real_batch/ckpt_000030/model.pt \
+CUDA_VISIBLE_DEVICES=$G0 MUJOCO_EGL_DEVICE_ID=$G0 $PY -m efvla.eval_libero --ckpt $OUT/real_batch/ckpt_000030/model.pt \
   --suite libero_object --tasks 0 --episodes 2 --video_every 1 --out $OUT/eval_smoke 2>&1 \
   | grep -vE "robosuite WARNING|private macro|setup_macros" | tee $OUT/eval_smoke.log
 echo "SMOKE_ALL_DONE $ARM $(date)"
