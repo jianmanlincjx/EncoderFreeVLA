@@ -4,6 +4,7 @@
 # 3 GPUs x 40 = global batch 120, 8000 steps (~14 epochs of 66,984 frames), warmup 500, ckpt every 2000.
 set -e
 source $(dirname $0)/env.sh
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ARM=$1; GPUS=$2; PORT=$3; shift 3
 N=$(echo $GPUS | tr ',' '\n' | wc -l)
 PER=$((120 / N))
