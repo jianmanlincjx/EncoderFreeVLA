@@ -3,7 +3,7 @@
 # 1) 30 steps at the real batch (diag on, checkpoint + optimizer save at step 30)
 # 2) 200-step overfit on one fixed batch (no augmentation)
 # 3) checkpoint reload + 1 task x 2 episodes closed-loop eval
-set -e
+set -eo pipefail
 source $(dirname $0)/env.sh
 ARM=$1; GPUS=$2; PORT=${3:-29611}
 N=$(echo $GPUS | tr ',' '\n' | wc -l)

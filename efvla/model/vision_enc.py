@@ -25,10 +25,14 @@ class ENCVision(nn.Module):
         from transformers import SiglipVisionConfig, SiglipVisionModel
 
         if siglip_path is not None:
+            vcfg = SiglipVisionConfig.from_pretrained(siglip_path)  # vision_config of the full SigLIP checkpoint
+            vcfg.vision_use_head = False  # the attention-pooling head is unused here (would hold grad-less params)
             model, info = SiglipVisionModel.from_pretrained(
-                siglip_path, dtype=torch.float32, vision_use_head=False, output_loading_info=True
+                siglip_path, config=vcfg, dtype=torch.float32, output_loading_info=True
             )
             assert not info["missing_keys"], f"SigLIP missing keys: {info['missing_keys']}"
+            stray = [k for k in info["unexpected_keys"] if k.startswith("vision_model.") and not k.startswith("vision_model.head.")]
+            assert not stray, f"unexpected vision-tower keys: {stray[:5]}"
             bad = [k for k in info.get("mismatched_keys", [])]
             assert not bad, f"SigLIP mismatched keys: {bad}"
             self.loading_info = {k: list(v) for k, v in info.items()}
